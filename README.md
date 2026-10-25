@@ -41,8 +41,14 @@
 | 长名字排版 | ✅ 按**像素**截断，不按字符数 |
 | 界面排版 | ✅ 会话列表 / 聊天 / 菜单 / 快捷回复 |
 | `websocket-client` 依赖 | ✅ 已装在板上（1.2.3） |
-| **26 键中英输入** | ⚠️ 代码完成，**界面未在真机上验过**（见第 10 节） |
-| **语音转文字** | ⚠️ 代码完成，**未装 Vosk、未验过**（见第 10 节） |
+| **四态拼音键盘** | ✅ 中 / 英 / 中符 / 英符，四页几何一致，切页只换键帽（见第 9 节） |
+| **连续拼词 + 预测** | ✅ 整串前缀匹配（`ceshi` →「测试」），选完保留剩余音节继续拼 |
+| **语音转文字** | ✅ 云端 Deepgram 主力（nova-3）+ 本地 Vosk 兜底，结果进缓冲区可编辑 |
+
+> 说明：键盘和语音是 2026-10 后加进去的，早期 README 里那两行标着"未验证"。
+> 现在功能都实现完了，`config.py` 里 `DEMO_MODE = True` 是**故意留的**——
+> 调界面和输入法时不用每次登真号（一个 QQ 登两处会互相挤下线）。
+> 接真号时把它改成 `False` 即可。
 
 离线测试 **338 项**（`test_render.py` 228 + `test_input.py` 110），
 本地（Py3.11）全绿：
@@ -78,6 +84,16 @@ SERVER_HOST = "1.2.3.4"       # NapCat 所在服务器的地址
 SERVER_PORT = 20056                # **外网**端口（NAT 后的，不是容器里的 3001）
 ACCESS_TOKEN = "..."               # NapCat 里设的 token
 ```
+
+> **地址、token、API key 别直接写进 `config.py`。**
+> 仓库里这三个字段是空的，真值写在同目录的 `secrets_local.py`（已在
+> `.gitignore` 里），`config.py` 末尾会 `from secrets_local import *` 覆盖上来。
+> 照 `secrets_local.example.py` 建一份就行 —— 这样 clone 下来也不会把你的
+> 服务器地址推上去。没有这个文件程序照样能跑，只是连不上服务器、云端语音不可用。
+
+> 另外 `config.py` 里有个 `DEMO_MODE = True`：**不连服务器、不登 QQ**，
+> 直接喂 `democlient.py` 里的假消息。调界面和输入法时用这个，
+> 免得一个 QQ 号登两处互相挤下线。接真号改成 `False`。
 
 ### NapCat 那边要做的
 
@@ -187,11 +203,18 @@ onebot.py      OneBot 11 协议客户端
 textbuffer.py  文本缓冲区（光标/插入/删除/拼音组字/撤销）
                · **纯逻辑**，不碰屏幕网络音频，所以能完全离线测
                · 键盘和语音都往这里塞 —— 这就是"语音结果可编辑"的落点
-pinyin_ime.py  拼音 → 候选字/词（数据来自板子已装的 pypinyin）
-voice.py       语音识别（VoiceEngine 接口 + Vosk 实现 + NullEngine 兜底）
+pinyin_ime.py  拼音 → 候选字/词（整串前缀匹配 + 预测）
+               · 词库读预生成的 ime_words.txt / ime_chars.txt（建索引 14s，
+                 现场从 pypinyin 算要 39s）
+gen_words.py   生成上面那两个词库文件（改词库后跑一次）
+voice.py       语音采集 + 本地识别（VoiceEngine 接口 + VoskEngine + NullEngine）
+cloud_asr.py   云端识别（Deepgram），只用标准库 urllib/json，**不用 pip 装包**
 app.py         界面（会话列表 / 聊天 / 菜单 / 快捷回复 / 打字输入）
+               · 四态键盘 KB_MODES = cn / en / cn_sym / en_sym
+               · 候选栏 5 格 × 40px（6×33 会把两字词截成「…」）
                · 按**像素**截断和折行（不按字符数）
                · @ 名字回填（refresh_at_names）
+selftest.py    自检脚本
 test_render.py 渲染和布局的离线测试，228 项
 test_input.py  输入系统的离线测试，110 项
 docs/          界面截图
@@ -257,7 +280,7 @@ QQ 的 at 段里**只有 QQ 号，没有名字**：
 成员表是 `(群号, QQ号)` 两级的。不同群里同一个 QQ 号是**两个人**，
 拿全局表按 QQ 号直接查会张冠李戴。
 
-## 9. 打字输入和语音（新，待真机验证）
+## 9. 打字输入和语音
 
 ### 两种输入走同一个缓冲区
 
@@ -401,32 +424,24 @@ RK3308 上不是一瞬间的事，不能拖慢启动。
 ```
 
 为什么云端当主力：本地 Vosk small-cn 词错率约 **23.5%**（四五个字错一个），
-实测没法用。Deepgram nova-2 中文好一个量级。
+实测没法用。Deepgram nova-3 中文好一个量级。
 
 配置（`config.py`）：
 
 ```python
 ASR_PROVIDER = "deepgram"      # "none" = 只用本地、不上传音频
-DEEPGRAM_KEY = "..."
-DEEPGRAM_MODEL = "nova-2"
-DEEPGRAM_LANG = "zh-CN"
-CLOUD_TIMEOUT = 25.0           # 见下面「慢」那条
+DEEPGRAM_KEY = "..."           # 填在 secrets_local.py 里
+DEEPGRAM_MODEL = "nova-3"
+DEEPGRAM_LANG = "zh-CN"        # 说英文多就改 en-US
+CLOUD_TIMEOUT = 30.0           # 见下面「慢」那条
+MAX_REC_SEC = 30.0             # 单次录音上限
 ```
 
-**为什么超时给到 25 秒**：板子上传带宽有限，实测 3 秒音频 2.4 秒往返、
-10 秒音频 8.5 秒往返（大约每 1 秒音频 0.8 秒）。等待期间标题栏会显示
-「云端识别中… N 秒」，不会让人以为卡死。
+**为什么超时给到 30 秒**：板子上传带宽有限，实测 3 秒音频 2.4 秒往返、
+10 秒音频 8.5 秒往返（大约每 1 秒音频 0.8 秒）。30 秒上限最坏要 25 秒左右，
+给 30 留点余量。等待期间标题栏会显示「云端识别中… N 秒」，不会让人以为卡死。
 
 本地 Vosk 还是要装（兜底用）：
-
-```bash
-pip3 install vosk            # ≈20MB
-mkdir -p /root/M10_QQ/models && cd /root/M10_QQ/models
-# 从 https://alphacephei.com/vosk/models 下：
-#   vosk-model-small-cn-0.22      中文  42MB
-#   vosk-model-small-en-us-0.15   英文  40MB
-```
-
 
 ```bash
 pip3 install vosk            # ≈20MB
@@ -442,7 +457,7 @@ mkdir -p /root/M10_QQ/models && cd /root/M10_QQ/models
 没装 Vosk / 模型没下 / 路径写错 → 语音键自动变灰，**键盘和收发消息
 完全不受影响**（`voice.py` 的工厂函数一律退回 NullEngine）。
 
-### 待验证（这几件我验不了）
+### 还没确认清楚的几件事
 
 | 要验的 | 怎么验 |
 |---|---|
