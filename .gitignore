@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 运行时数据
+data/
+*.log
+
+# 会话/助手数据，不进仓库
+.workbuddy/
+
+# 私密配置（服务器地址 / token / API key）
+secrets_local.py
+
+# 临时截图，不公开
+屏幕截图*.png
