@@ -463,22 +463,44 @@ def test_voice_state_machine():
 
 
 def test_cand_width():
-    print("\n[候选栏宽度 —— 两个字的词不能被截成省略号]")
+    print("\n[候选栏自适应 —— 三字词必须完整显示]")
     import app as appmod
 
-    # 用户看到一排「…」，其实是格子 33px < 两字 34px，被 fit_text 截了
-    for w in ("测试", "百度", "你好", "中国"):
-        shown = appmod.fit_text(w, appmod.CAND_W - 2)
-        check("%s 完整显示" % w, shown == w, repr(shown))
+    # 三字词 51px：以前一页 5 格 × 40px（可用 38），fit_text 一定截成
+    # 「测…」，用户看到一排省略号，只能猜。
+    for w in ("测试", "测试一", "你好啊", "不要了"):
+        pages = appmod.paginate_candidates([w])
+        text, x, index = pages[0][0]
+        check("%s 完整显示" % w, text == w, repr(text))
+        check("%s 下标正确" % w, index == 0, str(index))
+        right = x + appmod.text_width(w)
+        check("%s 不越过右边界" % w, right <= appmod.CAND_RIGHT,
+              "%d > %d" % (right, appmod.CAND_RIGHT))
 
-    need = appmod.text_width("测试")
-    check("格子放得下两个字", appmod.CAND_W - 2 >= need,
-          "需要 %d, 可用 %d" % (need, appmod.CAND_W - 2))
+    # 5 个三字词一页装不下 → 自动分页，一个都不能丢、不能乱序
+    words = ["测试一", "测试二", "测试三", "测试四", "测试五"]
+    pages = appmod.paginate_candidates(words)
+    check("三字词自动分页", len(pages) >= 2, "%d 页" % len(pages))
+    flat = [w for page in pages for w, _x, _i in page]
+    check("分页后候选没丢也没乱序", flat == words, str(flat))
+    idx = [i for page in pages for _w, _x, i in page]
+    check("下标连续", idx == list(range(len(words))), str(idx))
 
-    # 候选区 + 右箭头不能撞
-    right = appmod.CAND_X0 + appmod.CAND_COUNT * appmod.CAND_W
-    check("候选区不压到 ›", right <= appmod.W - 14, "%d > %d" % (right, appmod.W - 14))
+    # 单字一页最多 CAND_SLOTS 个
+    pages = appmod.paginate_candidates(["啊"] * 20)
+    check("单字一页不超过 %d 个" % appmod.CAND_SLOTS,
+          max(len(p) for p in pages) <= appmod.CAND_SLOTS,
+          str([len(p) for p in pages]))
+
+    # 任何一页的最后一个候选都不能压到 › 上
+    overflow = [p for p in pages
+                if p and p[-1][1] + appmod.text_width(p[-1][0]) > appmod.CAND_RIGHT]
+    check("所有候选不越过右边界", not overflow, str(overflow[:1]))
+
+    # 两侧箭头的位置要留住
     check("左边给 ‹ 留了位置", appmod.CAND_X0 >= 14, str(appmod.CAND_X0))
+    check("右边给 › 留了位置", appmod.CAND_RIGHT <= appmod.W - 14,
+          "%d > %d" % (appmod.CAND_RIGHT, appmod.W - 14))
 
 
 def test_keyboard_pages():
@@ -1411,8 +1433,8 @@ def test_input_ui_show_hide():
     check("建出了输入界面的 item", len(t.input_items) > 30,
           "%d 个" % len(t.input_items))
     check("有文本行", len(t.in_rows) == appmod.TEXT_LINES)
-    check("有候选位", len(t.in_cands) == appmod.CAND_COUNT,
-          "%d 个（应为 %d）" % (len(t.in_cands), appmod.CAND_COUNT))
+    check("有候选位", len(t.in_cands) == appmod.CAND_SLOTS,
+          "%d 个（应为 %d）" % (len(t.in_cands), appmod.CAND_SLOTS))
     check("候选有两个翻页箭头",
           t.cand_prev is not None and t.cand_next is not None)
     check("键数够多", len(t.keys) >= 30, "%d 个键" % len(t.keys))

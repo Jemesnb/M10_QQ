@@ -95,18 +95,21 @@ TEXT_TOP = 40
 TEXT_LINES = 4
 CAND_TOP = 140
 
-# 候选栏。屏宽 240，左留 20px 给 `‹`，右边到 `›`（226）之前可用 204px。
+# 候选栏。屏宽 240，左留 20px 给 `‹`，右边到 `›`（226）之前可用 202px。
 #
-# ⚠️ 从 6×33 改成 5×40：中文字宽 17px，**两个字的词要 34px**，
-# 33px 的格子装不下，fit_text 会直接截成「…」—— 用户看到一排省略号，
-# 等于没候选。40px 放得下两个字（34px + 6px 余量）。
-# 代价是一页少一个候选，翻页补回来。
-CAND_COUNT = 5
+# ⚠️ 不再是等宽格子。中文字宽 17px：两字 34、**三字 51**。
+# 以前一页 5 格 × 40px（可用 38），三字词必然被 fit_text 截成「测…」
+# —— 用户看到一排省略号，等于没候选，只能猜。
+# 现在按**实际字宽**装箱：位置和每页个数都由 paginate_candidates()
+# 现算 —— 单字一页能挤 8 个，三字词一页放 3 个，全都完整显示。
+# 点哪儿也按这个布局反查（_cand_hits），不再拿 x 除格子宽。
 CAND_X0 = 20
-CAND_W = 40
+CAND_RIGHT = 222        # 候选区右边界（`›` 从 226 开始画，留 4px）
+CAND_GAP = 8            # 候选之间的空隙
+CAND_SLOTS = 8          # 一页最多几个（全单字时的极限）
 # 一次算多少个候选。5 页够翻的了 —— 'mao' 有 60 多个同音字，
 # 全算出来也没人翻到底，白白占 CPU（板子是弱鸡）。
-CAND_MAX = CAND_COUNT * 5
+CAND_MAX = CAND_SLOTS * 5
 
 # 隐藏控件时把它们挪到这儿 —— 屏幕（240×320）外面。
 # 藏起来不靠 state 的原因见 _show_input_ui。
@@ -660,6 +663,38 @@ def fit_text(s, width, ellipsis="…", size=FONT):
     return "".join(out) + ellipsis
 
 
+def paginate_candidates(cands):
+    """把候选按**像素宽度**装进每一页。
+
+    返回 ``[[(文字, x, 全局下标), ...], ...]``：第一层是页，第二层是
+    这一页里每个候选的词、左边界、以及它在 cands 里的下标。
+
+    ⚠️ 为什么不用等宽格子：格子宽必须按最长的词算，三字词 51px 就
+    只剩 3 格/页，单字词浪费一大半；按 40px 算又装不下三字词，
+    fit_text 直接截成「测…」。按实际宽度流式排，两头都不亏。
+    """
+    limit = CAND_RIGHT - CAND_X0
+    pages = []
+    page = []
+    used = 0.0                      # 本页已占宽度（相对 CAND_X0）
+    for index, word in enumerate(cands):
+        w = text_width(word)
+        if page:
+            x = used + CAND_GAP
+            if x + w > limit or len(page) >= CAND_SLOTS:
+                pages.append(page)
+                page = []
+                used = 0.0
+                x = 0.0
+        else:
+            x = 0.0
+        page.append((word, CAND_X0 + x, index))
+        used = x + w
+    if page:
+        pages.append(page)
+    return pages
+
+
 def wrap_text(text, width):
     """折行。width 是**字符数**口径，保留给旧调用方；
 
@@ -951,22 +986,33 @@ class QQTerm(object):
         self.in_cursor = mk(g.fill_rect(x=PAD, y=TEXT_TOP, w=2, h=LINE_H - 4,
                                         color=ACCENT), PAD, TEXT_TOP)
 
-        # 候选栏：6 个候选 + 左右翻页箭头
+        # 候选栏：最多 CAND_SLOTS 个位子 + 左右翻页箭头
         #
-        # ⚠️ 从 4 个加到 6 个，是因为用户报"打个 mao 根本点不到冒" ——
-        # 'mao' 有 60 多个同音字，4 个位置连常用字都装不下。
-        # 现在 6 个 + 翻页，第 2 页也能点到。
+        # ⚠️ 控件数量固定（CAND_SLOTS 个），但**位置不固定** ——
+        # 每页放几个、每个从哪儿开始，全由 paginate_candidates()
+        # 按实际字宽算（单字 8 个/页，三字词 3 个/页）。
+        # 以前是 5 个等宽 40px 格子，三字词 51px 必然被截成「测…」。
         #
-        # 横向分配：左留 20px 给 ‹，右边 226 处是 ›，中间 204px 放
-        # 5 个候选（每个 40px）。40px 是为了**放得下两个字的词** ——
-        # 33px 会把「测试」截成「…」，见上面 CAND_W 的注释。
+        # ⚠️ input_items 里别的条目都是不可变 tuple，候选这里必须用
+        # **list**：_draw_input 每次摆完位置要回写 x，_show_input_ui
+        # 收起/展开时按最新的 x 回位（否则展开后候选全挤在左端）。
         self.in_cands = []
+        self.cand_home = []           # 和 in_cands 一一对应的 [item, x, y]
+        self._cand_hits = []          # 当前页布局，handle_tap 反查用
         self.cand_page = 0            # 候选翻到第几页
-        for i in range(CAND_COUNT):
-            cx = CAND_X0 + i * CAND_W
-            self.in_cands.append(mk(g.draw_text(
+        for i in range(CAND_SLOTS):
+            cx = CAND_X0              # 真实位置由 _draw_input 摆
+            item = g.draw_text(
                 x=cx, y=CAND_TOP + 2, text="", color=ACCENT,
-                font_size=FONT, origin="nw"), cx, CAND_TOP + 2))
+                font_size=FONT, origin="nw")
+            try:
+                item.config(state="hidden")
+            except Exception:
+                pass
+            entry = [item, cx, CAND_TOP + 2]
+            self.cand_home.append(entry)
+            self.input_items.append(entry)
+            self.in_cands.append(item)
         # 翻页箭头。只在候选多于一页时显示
         self.cand_prev = mk(g.draw_text(x=2, y=CAND_TOP + 2, text="‹",
                                         color=DIM, font_size=FONT,
@@ -1557,16 +1603,21 @@ class QQTerm(object):
         self.in_cursor.config(x=PAD + cur_x, y=cy, w=2, h=LINE_H - 6)
 
         # 候选栏：只有中文组字的时候才有东西。
-        # 一页放不下就翻页 —— 见 in_cands 那里的注释（'mao' 有 60 多个）。
+        # 一页放不下就翻页；每页放几个按**实际字宽**算，不再固定 5 个
+        # —— 见 paginate_candidates()（三字词 51px，等宽格子必然截断）。
         all_cands = b.candidates if b.composing else []
-        pages = max(1, (len(all_cands) + CAND_COUNT - 1) // CAND_COUNT)
+        layout = paginate_candidates(all_cands)
+        pages = max(1, len(layout))
         self.cand_page = max(0, min(self.cand_page, pages - 1))
-        start = self.cand_page * CAND_COUNT
-        page = all_cands[start:start + CAND_COUNT]
+        page = layout[self.cand_page] if layout else []
+        self._cand_hits = page          # handle_tap 按这个反查点了哪个
 
         for i, item in enumerate(self.in_cands):
             if i < len(page):
-                item.config(text=fit_text(page[i], CAND_W - 2), color=ACCENT)
+                word, cx, _index = page[i]
+                # 完整显示，不再 fit_text —— 位置也是算好的，不用截
+                item.config(text=word, x=cx, color=ACCENT)
+                self.cand_home[i][1] = cx    # 收起/展开按最新位置回位
             else:
                 item.config(text="")
 
@@ -2067,21 +2118,22 @@ class QQTerm(object):
                     self.cand_page = max(0, self.cand_page - 1)
                     self._draw_input()
                     return
-                if pages > 1 and x >= CAND_X0 + CAND_COUNT * CAND_W:
+                if pages > 1 and x >= CAND_RIGHT:
                     self.cand_page = min(pages - 1, self.cand_page + 1)
                     self._draw_input()
                     return
-                # 候选格子：按**显示的位置**算下标，再加上翻页偏移
-                i = int((x - CAND_X0) // CAND_W)
-                if 0 <= i < CAND_COUNT:
-                    real = self.cand_page * CAND_COUNT + i
-                    if real < len(self.buffer.candidates) \
-                            and self._pick_candidate(real):
-                        # 内容变了 → 取消"待确认发送"。否则：点一下发送（变红）
-                        # → 再把拼音选成字 → 再点一下就直接发出去了，
-                        # 用户以为是第一次确认。
-                        self.send_armed = False
-                        self._draw_input()
+                # 候选：按本页的**实际布局**反查 —— 每个词宽度都不一样，
+                # 不能再拿 (x - CAND_X0) // CAND_W 算下标（那是等宽格子
+                # 时代的算法，现在三字词和单字宽度差三倍）。
+                for word, cx, real in getattr(self, "_cand_hits", ()):
+                    half = CAND_GAP / 2.0
+                    if cx - half <= x < cx + text_width(word) + half:
+                        if self._pick_candidate(real):
+                            # 内容变了 → 取消"待确认发送"。否则：点一下发送（变红）
+                            # → 再把拼音选成字 → 再点一下就直接发出去了，
+                            # 用户以为是第一次确认。
+                            self.send_armed = False
+                            self._draw_input()
                         return
             # 文本区点一下：把光标挪到点到的地方（大致的，按像素反推）
             if TEXT_TOP <= y < CAND_TOP:
